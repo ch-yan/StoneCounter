@@ -7,7 +7,7 @@
 #include "StoneCounter.h"
 #include "StoneCounterDlg.h"
 #include "afxdialogex.h"
-
+#include <pcl/features/normal_3d_omp.h>
 //#ifdef _DEBUG
 //#define new DEBUG_NEW
 //#endif
@@ -19,7 +19,7 @@ class CAboutDlg : public CDialogEx
 {
 public:
 	CAboutDlg();
-
+	
 // 对话框数据
 #ifdef AFX_DESIGN_TIME
 	enum { IDD = IDD_ABOUTBOX };
@@ -59,7 +59,7 @@ CStoneCounterDlg::CStoneCounterDlg(CWnd* pParent /*=nullptr*/)
 void CStoneCounterDlg::DoDataExchange(CDataExchange* pDX)
 {
 	CDialogEx::DoDataExchange(pDX);
-	DDX_Control(pDX, IDC_EDIT_OUTPUT, m_edit_output);
+	DDX_Control(pDX, IDC_EDIT_OUTPUT, m_editOutput);
 }
 
 BEGIN_MESSAGE_MAP(CStoneCounterDlg, CDialogEx)
@@ -123,12 +123,21 @@ BOOL CStoneCounterDlg::OnInitDialog()
 	m_win->Render();//开始渲染
 
 	//设置pclviewer窗口
-	m_viewer_viewport1 = 1;
-	m_viewer_viewport2 = 2;
-	m_viewer->createViewPort(0, 0, 0.5, 1, m_viewer_viewport1);
-	m_viewer->createViewPort(0.5, 0, 1, 1, m_viewer_viewport2);
-	
+	m_nLeftViewport = 1;
+	m_nLeftViewport = 2;
+	m_viewer->createViewPort(0.0, 0.0, 0.5, 0.5, m_nLeftViewport);
+	m_viewer->createViewPort(0, 0.5, 1, 1, m_nRightViewport);
 
+	//初始化PCD源文件
+	m_curCloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+	//设置CEdit控件
+	CEdit* pEditCtrl = (CEdit*)GetDlgItem(IDC_EDIT_OUTPUT); 
+	// 修改控件样式以支持多行文本
+	pEditCtrl->ModifyStyle(0, ES_MULTILINE | ES_AUTOVSCROLL);
+
+	// 设置控件的宽度和高度，以适应多行文本
+	//pEditCtrl->SetWindowPos(NULL, 0, 0, 400, 300, SWP_NOMOVE | SWP_NOZORDER);
 	return TRUE;  // 除非将焦点设置到控件，否则返回 TRUE
 }
 
@@ -190,31 +199,40 @@ void CStoneCounterDlg::OnBnClickedOpenFile()
 		strFile = dlgFile.GetPathName();
 		//Cstring 转string
 		CString theCStr;
+		clock_t start = clock();
+
 		std::string STDStr(CW2A(strFile.GetString()));
-		pcl::PointCloud<pcl::PointXYZ>::Ptr 
-			cloud(new pcl::PointCloud<pcl::PointXYZ>);
-		if (pcl::io::loadPCDFile<pcl::PointXYZ>(STDStr, *cloud) == -1)//*打开点云文件
+		/*pcl::PointCloud<pcl::PointXYZ>::Ptr 
+			m_curCloud(new pcl::PointCloud<pcl::PointXYZ>);*/
+		if (pcl::io::loadPCDFile<pcl::PointXYZ>(STDStr, *m_curCloud) == -1)//*打开点云文件
 		{
 			AfxMessageBox(_T("读入点云数据失败"));
 		}
-		cout << cloud->points.size() << endl;
+		cout << m_curCloud->points.size() << endl;
 		m_viewer->removeAllPointClouds();//将前一次点云移除  
 
-		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> single_color(cloud, 0, 255, 0);
+		CString info;
+		info.Format(_T("open file cost: %.1f s."), (double)(clock() - start) / CLOCKS_PER_SEC);
+		output(info);
 
-		m_viewer->addPointCloud<pcl::PointXYZ >(cloud, single_color, "org_cloud", m_viewer_viewport1);
-		setCamera(cloud, "org_cloud");
+		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> single_color(m_curCloud, 0, 255, 0);
+
+		m_viewer->addPointCloud<pcl::PointXYZ >(m_curCloud, single_color, "org_cloud", m_nLeftViewport);
+		SetCamera(m_curCloud, "org_cloud");
 		
-		m_viewer->spinOnce(5000);
+		m_viewer->spinOnce();
+
+		
+
 	}
 }
 
 void CStoneCounterDlg::OnBnClickedCluster()
 {
-	m_edit_output.SetWindowTextW(L"begin clicked");
+	m_editOutput.SetWindowTextW(L"begin clicked");
 	// 创建KdTreee对象作为搜索方法
 	pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-	tree->setInputCloud(cloud);
+	tree->setInputCloud(m_curCloud);
 
 	std::vector<pcl::PointIndices> cluster_indices;
 
@@ -222,13 +240,15 @@ void CStoneCounterDlg::OnBnClickedCluster()
 	//求法线
 	std::cout << "start computing normals ..." << std::endl;
 	pcl::PointCloud <pcl::Normal>::Ptr normals(new pcl::PointCloud <pcl::Normal>);
-	pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> normal_estimator;
+	pcl::NormalEstimationOMP<pcl::PointXYZ, pcl::Normal> normal_estimator;
 	normal_estimator.setSearchMethod(tree);
-	normal_estimator.setInputCloud(cloud);
+	normal_estimator.setInputCloud(m_curCloud);
 	normal_estimator.setKSearch(50);
 	normal_estimator.compute(*normals);
 
-	std::cout << "computing normals cost" << (double)(clock() - start) / CLOCKS_PER_SEC << std::endl;
+	CString info;
+	info.Format(_T("computing normals cost: %f s"), (double)(clock() - start)/CLOCKS_PER_SEC);
+	output(info);
 
 	//区域生长分割器
 	start = clock();
@@ -237,30 +257,29 @@ void CStoneCounterDlg::OnBnClickedCluster()
 	//输入分割目标
 	reg.setSearchMethod(tree);
 	reg.setNumberOfNeighbours(30);
-	reg.setInputCloud(cloud);
+	reg.setInputCloud(m_curCloud);
 	//reg.setIndices (indices);
 	reg.setInputNormals(normals);
 
 	//设置限制条件及先验知识
 	reg.setMinClusterSize(2000);
 	reg.setMaxClusterSize(1000000);
-	reg.setSmoothnessThreshold(30.0 / 180.0 * M_PI);
+	reg.setSmoothnessThreshold(3.0 / 180.0 * M_PI);
 	reg.setCurvatureThreshold(1.0);
 
 	reg.extract(cluster_indices);
 
-	std::cout << "cluster operation cost: " << (double)(clock() - start) / CLOCKS_PER_SEC << "s, cluster size: " << cluster_indices.size() << endl;
+	info.Format(_T("cluster operation cost: %.1f s, cluster size is %d."), (double)(clock() - start) / CLOCKS_PER_SEC, cluster_indices.size());
+	output(info);
 	//遍历抽取结果，将其显示并保存
 	int j = 0;
 	for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
 	{
-		cout << j << ":" << it->indices.size() << endl;
-
 		//创建临时保存点云族的点云
 		pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>);
 		//////通过下标，逐个填充
 		for (std::vector<int>::const_iterator pit = it->indices.begin(); pit != it->indices.end(); pit++)
-			cloud_cluster->points.push_back(cloud->points[*pit]); //*
+			cloud_cluster->points.push_back(m_curCloud->points[*pit]); //*
 
 		//////设置点云属性
 		cloud_cluster->width = cloud_cluster->points.size();
@@ -272,29 +291,36 @@ void CStoneCounterDlg::OnBnClickedCluster()
 		ss << "cloud_cluster_" << j << ".pcd";
 		j++;
 		//writer.write<pcl::PointXYZ>(ss.str(), *cloud_cluster, false); //*
-
+		
 		//显示,随机设置不同颜色，以区分不同的聚类
 		pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> cluster_color(cloud_cluster, rand() * 100 + j * 80, rand() * 50 + j * 90, rand() * 200 + j * 100);
-		viewer.addPointCloud(cloud_cluster, cluster_color, ss.str(), 2);
-		viewer.spinOnce(5000);
-
+		m_viewer->addPointCloud(cloud_cluster, cluster_color, ss.str(), 2);
+		m_viewer->spinOnce();
 	}
 }
 
 
 
-void CStoneCounterDlg::SetCamera(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, const char* name
+void CStoneCounterDlg::SetCamera(pcl::PointCloud<pcl::PointXYZ>::Ptr m_curCloud, const char* name)
 {
 	// TODO: 在此处添加实现代码.
 	pcl::PointXYZ min_pt, max_pt;
-	pcl::getMinMax3D(*cloud, min_pt, max_pt);
+	pcl::getMinMax3D(*m_curCloud, min_pt, max_pt);
 
 	Eigen::Vector3f diff = max_pt.getVector3fMap() - min_pt.getVector3fMap();
 	float distance = diff.norm();
 	Eigen::Vector3f center((max_pt.x + min_pt.x) / 2, (max_pt.y + min_pt.y) / 2, (max_pt.z + min_pt.z) / 2);
 
-	m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "org_cloud");
+	m_viewer->setPointCloudRenderingProperties(pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, name);
 
-	m_viewer->setCameraPosition(center[0], center[1], center[2] + distance, center[0], center[1], center[2], 0, -1, 0);
+	m_viewer->setCameraPosition(center[0], center[1], center[2] + distance, center[0], center[1], center[2], -0.7, -1, 0.2);
+}
 
+void CStoneCounterDlg::output(CString info)
+{
+	CString text, wndText;
+	m_editOutput.GetWindowTextW(wndText);
+	text.Format(_T("%s\r\n%s"), wndText, info);
+
+	m_editOutput.SetWindowTextW(text);
 }
